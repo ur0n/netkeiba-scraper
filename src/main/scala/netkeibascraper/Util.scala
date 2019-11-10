@@ -104,6 +104,8 @@ object Util {
       "1000万下",
       "500万下",
       "未勝利",
+      "1勝クラス",
+      "2勝クラス",
       "新馬").zipWithIndex
 
   def str2cls(s: String): Int = {
