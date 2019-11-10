@@ -5,7 +5,7 @@ object Main {
 
   def init() = {
     Class.forName("org.sqlite.JDBC")
-    ConnectionPool.singleton("jdbc:sqlite:race.db", null, null)
+    ConnectionPool.singleton("jdbc:sqlite:output/race.db", null, null)
   }
 
   def main(args: Array[String]): Unit = {

@@ -8,8 +8,17 @@ import org.openqa.selenium.htmlunit.HtmlUnitDriver
 
 object RaceScraper {
 
-  val mail = "write your mail address"
-  val password = "write your password"
+  val mail: String = if (System.getenv("SCRAPER_LOGIN_MAIL") != null) {
+    System.getenv("SCRAPER_LOGIN_MAIL")
+  } else {
+    sys.error("please set SCRAPER_LOGIN_MAIL")
+  }
+
+  val password: String = if (System.getenv("SCRAPER_LOGIN_PASSWORD") != null) {
+    System.getenv("SCRAPER_LOGIN_PASSWORD")
+  } else {
+    sys.error("please set SCRAPER_LOGIN_PASSWORD")
+  }
 
   def scrape() = {
 
@@ -23,15 +32,20 @@ object RaceScraper {
     val re = """/race/(\d+)/""".r
 
     val nums =
-      io.Source.fromFile("race_url.txt").getLines.toList.
+      io.Source.fromFile("output/race_url.txt").getLines.toList.
         map { s => val re(x) = re.findFirstIn(s).get; x }
 
     val urls = nums.map(s => "https://db.netkeiba.com/race/" + s)
 
-    val folder = new File("html")
+    val folder = new File("output/html")
     if (!folder.exists()) folder.mkdir()
 
     var i = 0
+    val interval = if (System.getenv("SCRAPER_SCRAPE_INTERVAL") != null) {
+      System.getenv("SCRAPER_SCRAPE_INTERVAL").toLong
+    } else {
+      500L
+    }
 
     nums.zip(urls).map { case (num, url) =>
       i += 1
@@ -40,7 +54,7 @@ object RaceScraper {
       if (!file.exists()) {
         driver.get(url)
         //↓ここあんまり短くしないでね！
-        Thread.sleep(500)
+        Thread.sleep(interval)
         val html = driver.getPageSource()
         FileUtils.writeStringToFile(file, html)
       }

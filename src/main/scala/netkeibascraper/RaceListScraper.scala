@@ -45,7 +45,7 @@ object RaceListScraper {
         }.flatten
 
       racePages.foreach { url =>
-        FileUtils.writeStringToFile(new File("race_url.txt"), url + "\n", true)
+        FileUtils.writeStringToFile(new File("output/race_url.txt"), url + "\n", true)
       }
 
       baseUrl = extractPrevMonth(baseUrl)
