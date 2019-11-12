@@ -13,7 +13,12 @@ case class RaceInfo(
                      date: String,
                      place_detail: String,
                      race_class: String
-                   )
+                   ) {
+
+  def placeCode: String = {
+    place_detail.replaceAll("\\d+回([^\\d]+)\\d+日目", "$1")
+  }
+}
 
 object RaceInfoDao {
 

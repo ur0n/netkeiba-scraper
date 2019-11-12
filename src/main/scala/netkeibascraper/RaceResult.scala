@@ -24,7 +24,16 @@ case class RaceResult(
                        trainer_id: String,
                        owner_id: String,
                        earning_money: Option[Double]
-                     )
+                     ) {
+
+  def hweight: Int = {
+    horse_weight.replaceAll("""\([^\)]+\)""", "").toInt
+  }
+
+  def dhweight: Int = {
+    horse_weight.replaceAll(""".*\(([^\)]+)\).*""", "$1").toInt
+  }
+}
 
 object RaceResultDao {
 
