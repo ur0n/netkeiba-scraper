@@ -11,6 +11,7 @@ lazy val root = (project in file("."))
       "nu.validator.htmlparser" % "htmlparser" % "1.4",
       "org.seleniumhq.selenium" % "selenium-java" % "2.41.0",
       "org.scala-lang.modules" %% "scala-xml" % "1.1.1",
+      "io.github.scala-hamsters" %% "hamsters" % "2.6.0",
       "commons-lang" % "commons-lang" % "2.6"
     ),
     assemblyJarName in assembly := "netkeiba-scraper.jar",

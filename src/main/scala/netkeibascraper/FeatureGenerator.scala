@@ -3,6 +3,7 @@ package netkeibascraper
 import scalikejdbc._
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.control.Exception._
 
 object FeatureGenerator {
 
@@ -44,11 +45,24 @@ object RaceResultRepository {
     }
   }
 
-  def preSRa(horseId: Int, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Int]] = {
+  def pre(horseId: String, date: String, distance: Int)(implicit ec: ExecutionContext, session: DBSession): Future[PreRating] = {
     Future {
-      sql"""
+      val pre100 =
+        sql"""
         select
-          speed_figure
+          race_id,
+          jockey_id,
+          distance,
+          earning_money,
+          speed_figure,
+          order_of_finish,
+          (order_of_finish = '1') as is_win,
+          remark,
+          (remark = '出遅れ') as is_late,
+          last_phase,
+          length,
+          (julianday(${date}) - julianday(date)) as dsl
+          pass
         from
           race_result
         inner join
@@ -59,15 +73,59 @@ object RaceResultRepository {
           horse_id = ${horseId}
         and
           race_info.date < ${date}
-        and
-          speed_figure is not null
         order by date desc
-        limit 1
-      """.map(_.int("speed_figure")).single.apply()
+        limit 100
+      """.map(dto2Pre).list().apply()
+
+      val raceId = pre100.head.raceId
+      val jockeyId = pre100.head.jockeyId
+      val oof = pre100.head.oof
+      val lateStart = pre100.head.lateStart
+      val lastPhase = pre100.head.lastPhase
+      val margin = pre100.head.margin
+
+      val firstHavingSpeedFigure: Option[Pre] = pre100.collectFirst { case pre if pre.speedFigure.nonEmpty => pre }
+      val sra: Option[Int] = firstHavingSpeedFigure.flatMap(_.speedFigure)
+      val dsl: Option[Double] = firstHavingSpeedFigure.map(_.dsl)
+      val oof2 = allCatch opt {
+        val oofArr = pre100.map(_.oof).toArray
+        oofArr(1)
+      }
+
+      val lateList = pre100.map(_.isLate)
+      val lateStartPer = lateList.sum.toDouble / lateList.size
+
+      val (disRoc, eps, winRun) = if (pre100.isEmpty) {
+        (None, None, None)
+      } else {
+        val distances = pre100.map(_.distance)
+        val mean = distances.sum.toDouble / distances.size
+        val disRoc = Some((distance - mean) / mean)
+
+        val earningMoney = pre100.map(_.earningMoney).collect { case Some(em) => em }
+        val eps = Some(earningMoney.sum / earningMoney.size)
+
+        val wins = pre100.map(_.isWin)
+        val winRun = Some(wins.sum.toDouble / wins.size)
+
+        (disRoc, eps, winRun)
+      }
+
+      val diff = pre100
+        .filter(pre => pre.oof.forall(c => '0' < c && c < '9'))
+        .filterNot(pre => pre.pass.isEmpty)
+        .map(pre => {
+          val xs = pre.pass.split("-")
+          xs.map(_.toInt).sum.toDouble / xs.size - pre.oof.toInt
+        })
+
+      val runningStyle = diff.sum / diff.size
+
+      PreRating(raceId, jockeyId, disRoc, eps, sra, dsl, oof, oof2, winRun, lateStart, lateStartPer, lastPhase, margin, runningStyle)
     }
   }
 
-  def avgsr4(horseId: Int, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
+  def avgsr4(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
     Future {
       val srs =
         sql"""
@@ -96,7 +154,7 @@ object RaceResultRepository {
     }
   }
 
-  def avgWin4(horseId: Int, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
+  def avgWin4(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
     Future {
       val wins =
         sql"""
@@ -122,241 +180,6 @@ object RaceResultRepository {
         None
       else
         Some(wins.sum / wins.size)
-    }
-  }
-
-  def disavesr(horseId: Int, date: String, distance: Int)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val srs =
-        sql"""
-          select
-            speed_figure
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            horse_id = ${horseId}
-          and
-            race_info.date < ${date}
-          and
-            distance = ${distance}
-          and
-            speed_figure is not null
-          order by date desc
-          limit 100
-        """.map(_.double("speed_figure")).list.apply()
-
-      if (srs.isEmpty)
-        None
-      else
-        Some(srs.sum / srs.size)
-    }
-  }
-
-  def disRoc(horseId: Int, date: String, distance: Int)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val distances =
-        sql"""
-          select
-            distance
-          from
-            race_result
-          inner join
-            race_info
-          on race_result.race_id = race_info.id
-          where
-            horse_id = ${horseId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 100
-        """.map(_.double("distance")).list.apply()
-
-      if (distances.isEmpty)
-        None
-      else {
-        val mean = distances.sum.toDouble / distances.size
-        Some((distance - mean) / mean)
-      }
-    }
-  }
-
-  def eps(horseId: Int, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val earning_money =
-        sql"""
-          select
-            earning_money
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            horse_id = ${horseId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 100
-        """.map(_.doubleOpt("earning_money")).list.apply()
-
-      if (earning_money.isEmpty)
-        None
-      else
-        Some(earning_money.flatten.sum / earning_money.size)
-    }
-  }
-
-  def winRun(horseId: Int, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val wins =
-        sql"""
-          select
-            (order_of_finish = '1') as is_win
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            horse_id = ${horseId}
-          and
-            race_info.date < ${date}
-          limit 100
-        """.map(_.int("is_win")).list.apply()
-
-      if (wins.isEmpty)
-        None
-      else
-        Some(wins.sum.toDouble / wins.size)
-    }
-  }
-
-  def twinper(horseId: Int, date: String, trainerId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val wins =
-        sql"""
-          select
-            (order_of_finish = '1') as is_win
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            trainer_id = ${trainerId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 100
-        """.map(_.int("is_win")).list.apply
-
-      if (wins.isEmpty)
-        None
-      else
-        Some(wins.sum.toDouble / wins.size)
-    }
-  }
-
-  def owinper(horseId: Int, date: String, ownerId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val wins =
-        sql"""
-          select
-            (order_of_finish = '1') as is_win
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            owner_id = ${ownerId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 100
-        """.map(_.int("is_win")).list.apply
-
-      if (wins.isEmpty)
-        None
-      else
-        Some(wins.sum.toDouble / wins.size)
-    }
-  }
-
-  def dsl(horseId: Int, date: String, ownerId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      sql"""
-        select
-          (julianday(${date}) - julianday(date)) as dsl
-        from
-          race_result
-        inner join
-          race_info
-        on
-          race_result.race_id = race_info.id
-        where
-          horse_id = ${horseId}
-        and
-          race_info.date < ${date}
-        and
-          speed_figure is not null
-        order by date desc
-        limit 1
-      """.map(_.double("dsl")).single.apply()
-    }
-  }
-
-  def enterTimes(horseId: Int, date: String, ownerId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Double] = {
-    Future {
-      sql"""
-        select
-          count(*) as count
-        from
-          race_result
-        inner join
-          race_info
-        on
-          race_result.race_id = race_info.id
-        where
-          horse_id = ${horseId}
-        and
-          race_info.date < ${date}
-      """.map(_.double("count")).single.apply.get
-    }
-  }
-
-  def jEps(date: String, jockeyId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
-    Future {
-      val earning_money =
-        sql"""
-          select
-            earning_money
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            jockey_id = ${jockeyId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 100
-        """.map(_.doubleOpt("earning_money")).list.apply()
-
-      if (earning_money.isEmpty)
-        None
-      else
-        Some(earning_money.flatten.sum / earning_money.size)
     }
   }
 
@@ -389,12 +212,44 @@ object RaceResultRepository {
     }
   }
 
-  def jWinperOf(date: String, jockeyId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
+
+  def disavesr(horseId: String, date: String, distance: Int)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
+    Future {
+      val srs =
+        sql"""
+          select
+            speed_figure
+          from
+            race_result
+          inner join
+            race_info
+          on
+            race_result.race_id = race_info.id
+          where
+            horse_id = ${horseId}
+          and
+            race_info.date < ${date}
+          and
+            distance = ${distance}
+          and
+            speed_figure is not null
+          order by date desc
+          limit 100
+        """.map(_.double("speed_figure")).list.apply()
+
+      if (srs.isEmpty)
+        None
+      else
+        Some(srs.sum / srs.size)
+    }
+  }
+
+  def twinper(horseId: String, date: String, trainerId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
     Future {
       val wins =
         sql"""
           select
-            order_of_finish = '1' as is_win
+            (order_of_finish = '1') as is_win
           from
             race_result
           inner join
@@ -402,66 +257,26 @@ object RaceResultRepository {
           on
             race_result.race_id = race_info.id
           where
-            jockey_id = ${jockeyId}
+            trainer_id = ${trainerId}
           and
             race_info.date < ${date}
           order by date desc
           limit 100
-        """.map(_.double("is_win")).list.apply()
+        """.map(_.int("is_win")).list.apply
 
-      if (wins.nonEmpty) Some(wins.sum / wins.size)
-      else None
+      if (wins.isEmpty)
+        None
+      else
+        Some(wins.sum.toDouble / wins.size)
     }
   }
 
-  def preJockeyIdOpt(horseId: String, date: String, jockeyId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[String]] = {
+  def owinper(horseId: String, date: String, ownerId: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
     Future {
-      sql"""
-        select
-          jockey_id
-        from
-          race_result
-        inner join
-          race_info
-        on
-          race_result.race_id = race_info.id
-        where
-          horse_id = ${horseId}
-        and
-          race_info.date < ${date}
-        order by date desc
-        limit 1
-      """.map(_.string("jockey_id")).single.apply()
-    }
-  }
-
-  def preOOF(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[String]] = {
-    Future {
-      sql"""
-        select
-          order_of_finish
-        from
-          race_result
-        inner join
-          race_info
-        on
-          race_result.race_id = race_info.id
-        where
-          horse_id = ${horseId}
-        and
-          race_info.date < ${date}
-        order by date desc
-        limit 1
-      """.map(_.string("order_of_finish")).single.apply()
-    }
-  }
-
-  def pre2OOF(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[String]] = {
-    Future {
-      val orders =
+      val wins =
         sql"""
           select
-            order_of_finish
+            (order_of_finish = '1') as is_win
           from
             race_result
           inner join
@@ -469,71 +284,26 @@ object RaceResultRepository {
           on
             race_result.race_id = race_info.id
           where
-            horse_id = ${horseId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 2
-        """.map(_.string("order_of_finish")).list.apply()
-
-      if (orders.size == 2) orders.lastOption
-      else None
-    }
-  }
-
-  def preLateStart(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Boolean] = {
-    Future {
-      val preRemark =
-        sql"""
-          select
-            remark
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            horse_id = ${horseId}
-          and
-            race_info.date < ${date}
-          order by date desc
-          limit 1
-        """.map(_.stringOpt("remark")).single.apply().flatten
-
-      preRemark.nonEmpty && preRemark.get == "出遅れ"
-    }
-  }
-
-  def lateStartPer(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Double] = {
-    Future {
-      val lateList =
-        sql"""
-          select
-            (remark = '出遅れ') as is_late
-          from
-            race_result
-          inner join
-            race_info
-          on
-            race_result.race_id = race_info.id
-          where
-            horse_id = ${horseId}
+            owner_id = ${ownerId}
           and
             race_info.date < ${date}
           order by date desc
           limit 100
-        """.map(_.intOpt("is_late").getOrElse(0)).list.apply()
+        """.map(_.int("is_win")).list.apply
 
-      lateList.sum.toDouble / lateList.size
+      if (wins.isEmpty)
+        None
+      else
+        Some(wins.sum.toDouble / wins.size)
     }
   }
 
-  def preLastPhase(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Double]] = {
+
+  def enterTimes(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Double] = {
     Future {
       sql"""
         select
-          last_phase
+          count(*) as count
         from
           race_result
         inner join
@@ -544,9 +314,7 @@ object RaceResultRepository {
           horse_id = ${horseId}
         and
           race_info.date < ${date}
-        order by date desc
-        limit 1
-      """.map(_.doubleOpt("last_phase")).single.apply().flatten
+      """.map(_.double("count")).single.apply.get
     }
   }
 
@@ -563,48 +331,40 @@ object RaceResultRepository {
     }
   }
 
-  def preRaceIdOpt(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[Int]] = {
+  def preByJockey(jockeyId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[PreByJockey] = {
     Future {
-      sql"""
-        select
-          race_id
-        from
-          race_result
-        inner join
-          race_info
-        on
-          race_result.race_id = race_info.id
-        where
-          horse_id = ${horseId}
-        and
-          race_info.date < ${date}
-        order by date desc
-        limit 1
-      """.map(_.int("race_id")).single.apply()
+      val byJockey =
+        sql"""
+          select
+            earning_money,
+            order_of_finish = '1' as is_win
+          from
+            race_result
+          inner join
+            race_info
+          on
+            race_result.race_id = race_info.id
+          where
+            jockey_id = ${jockeyId}
+          and
+            race_info.date < ${date}
+          order by date desc
+          limit 100
+        """.map(result => (result.doubleOpt("earning_money"), result.double("is_win"))).list.apply()
+
+      if (byJockey.isEmpty) {
+        PreByJockey(None, None)
+      } else {
+        val earningMoney = byJockey.map(_._1).collect { case Some(em) => em }
+        val wins = byJockey.map(_._2)
+
+        PreByJockey(
+          Some(earningMoney.sum / earningMoney.size),
+          Some(wins.sum / wins.size)
+        )
+      }
     }
   }
-
-  def preMargin(horseId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[String]] = {
-    Future {
-      sql"""
-        select
-          length
-        from
-          race_result
-        inner join
-          race_info
-        on
-          race_result.race_id = race_info.id
-        where
-          horse_id = ${horseId}
-        and
-          race_info.date < ${date}
-        order by date desc
-        limit 1
-      """.map(_.stringOpt("length")).single.apply().flatten.map(Util.margin)
-    }
-  }
-
 
   private def dto2model(result: WrappedResultSet): RaceResult = {
     RaceResult(
@@ -632,7 +392,79 @@ object RaceResultRepository {
       result.doubleOpt("earning_money")
     )
   }
+
+  private def dto2Pre(result: WrappedResultSet): Pre = {
+    val raceId = result.int("race_id")
+    val jockeyId = result.string("jockey_id")
+    val speedFigure = result.intOpt("speed_figure")
+    val oof = result.string("order_of_finish")
+    val lateStart = result.stringOpt("remark").map(remark => remark == "出遅れ")
+    val isLate = result.intOpt("is_late").getOrElse(0)
+    val lastPhase = result.doubleOpt("last_phase")
+    val margin = Util.margin(result.string("length"))
+    val pass = result.string("pass")
+
+    val distance = result.double("distance")
+    val earningMoney = result.doubleOpt("earning_money")
+    val isWin = result.int("is_win")
+    val dsl = result.double("dsl")
+
+    Pre(
+      raceId,
+      jockeyId,
+      distance,
+      earningMoney,
+      speedFigure,
+      dsl,
+      oof,
+      isWin,
+      lateStart,
+      isLate,
+      lastPhase,
+      margin,
+      pass
+    )
+  }
 }
+
+case class Pre(
+                raceId: Int,
+                jockeyId: String,
+                distance: Double,
+                earningMoney: Option[Double],
+                speedFigure: Option[Int],
+                dsl: Double,
+                oof: String,
+                isWin: Int,
+                lateStart: Option[Boolean],
+                isLate: Int,
+                lastPhase: Option[Double],
+                margin: String,
+                pass: String
+              )
+
+case class PreRating(
+                      raceId: Int,
+                      jockeyId: String,
+                      disRoc: Option[Double],
+                      eps: Option[Double],
+                      sra: Option[Int],
+                      dsl: Option[Double],
+                      oof: String,
+                      oof2: Option[String],
+                      winRun: Option[Double],
+                      lateStart: Option[Boolean],
+                      lateStartPer: Double,
+                      lastPhase: Option[Double],
+                      margin: String,
+                      runningStyle: Double
+                    )
+
+case class PreByJockey(
+                        eps: Option[Double],
+                        winPer: Option[Double]
+                      )
+
 
 class FeatureGenerator(
                         val race_id: Int,
@@ -731,56 +563,18 @@ and
 
   def jWinperOf(jockey_id: String)(implicit s: DBSession): Option[Double] = Some(0)
 
-  private val preJockeyIdOpt: Option[String] = Some("")
-
-  val ridingStrongJockey: Option[Boolean] = for {
-    preJockeyId <- preJockeyIdOpt
-    preWinper <- jWinperOf(preJockeyId)
-    winper <- jwinper
-  } yield preJockeyId != jockey_id && preWinper < winper
+  val ridingStrongJockey: Option[Boolean] = Some(true)
 
   val preOOF: Option[String] = Some("")
 
   val pre2OOF: Option[String] = Some("")
 
-  val runningStyle: Double = {
-    val orders =
-      sql"""
-select
-  order_of_finish,
-  pass
-from
-  race_result
-inner join
-  race_info
-on
-  race_result.race_id = race_info.id
-where
-  horse_id = ${horse_id}
-and
-  race_info.date < ${info.date}
-order by date desc
-limit 100
-""".map(rs => (rs.string("order_of_finish"), rs.string("pass"))).
-        list.
-        apply
-
-    val diff =
-      orders.filter(_._1.forall(c => '0' < c && c < '9')).
-        filterNot(_._2.isEmpty).
-        map { case (order_of_finish, pass) =>
-          val xs = pass.split("-")
-          xs.map(_.toInt).sum.toDouble / xs.size - order_of_finish.toInt
-        }
-
-    diff.sum / diff.size
-  }
+  val runningStyle: Double = 0
 
   val preLateStart: Boolean = true
 
   val lateStartPer: Double = 0
 
-  // ここまでやった
   val preLastPhase: Option[Double] = Some(0)
 
   val course: String = Util.course(info.surface)
@@ -794,15 +588,9 @@ limit 100
   // headCount by pre race id
   val preHeadCount: Option[Double] = preRaceIdOpt.map(_ => 0)
 
-  val surfaceChanged: Option[Boolean] = preRaceIdOpt.map(preRaceId => {
-    val info = RaceInfoDao.getById(preRaceId)
-    surface != Util.surface(info.surface)
-  })
+  val surfaceChanged: Option[Boolean] = Some(true)
 
-  val gradeChanged: Option[Int] = preRaceIdOpt.map(preRaceId => {
-    val info = RaceInfoDao.getById(preRaceId)
-    Util.str2cls(info.race_class) - grade
-  })
+  val gradeChanged: Option[Int] = Some(1)
 
   val preMargin: Option[String] = Some("")
 
