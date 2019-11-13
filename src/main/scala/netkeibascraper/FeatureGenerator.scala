@@ -30,7 +30,7 @@ object FeatureGenerator {
 }
 
 object RaceResultRepository {
-  def findByRaceIdAndHorseNumber(raceId: Int, horseNumber: Int)(implicit ec: ExecutionContext, session: DBSession): Future[RaceResult] = {
+  def findByRaceIdAndHorseNumber(raceId: Int, horseNumber: Int)(implicit ec: ExecutionContext, session: DBSession): Future[Option[RaceResult]] = {
     Future {
       sql"""
         select
@@ -41,13 +41,13 @@ object RaceResultRepository {
           race_id = ${raceId}
         and
           horse_number = ${horseNumber}
-      """.map(dto2model).single().apply().get
+      """.map(dto2model).single().apply()
     }
   }
 
-  def pre(horseId: String, date: String, distance: Int)(implicit ec: ExecutionContext, session: DBSession): Future[PreRating] = {
+  def pre(horseId: String, date: String, distance: Int)(implicit ec: ExecutionContext, session: DBSession): Future[Option[PreRating]] = {
     Future {
-      val pre100 =
+      val pre100: List[Pre] =
         sql"""
         select
           race_id,
@@ -77,51 +77,54 @@ object RaceResultRepository {
         limit 100
       """.map(dto2Pre).list().apply()
 
-      val raceId = pre100.head.raceId
-      val jockeyId = pre100.head.jockeyId
-      val oof = pre100.head.oof
-      val lateStart = pre100.head.lateStart
-      val lastPhase = pre100.head.lastPhase
-      val margin = pre100.head.margin
+      if (pre100.nonEmpty) {
+        val raceId: Int = pre100.head.raceId
+        val jockeyId: String = pre100.head.jockeyId
+        val oof: String = pre100.head.oof
+        val lateStart: Option[Boolean] = pre100.head.lateStart
+        val lastPhase: Option[Double] = pre100.head.lastPhase
+        val margin: String = pre100.head.margin
 
-      val firstHavingSpeedFigure: Option[Pre] = pre100.collectFirst { case pre if pre.speedFigure.nonEmpty => pre }
-      val sra: Option[Int] = firstHavingSpeedFigure.flatMap(_.speedFigure)
-      val dsl: Option[Double] = firstHavingSpeedFigure.map(_.dsl)
-      val oof2 = allCatch opt {
-        val oofArr = pre100.map(_.oof).toArray
-        oofArr(1)
-      }
+        val firstHavingSpeedFigure: Option[Pre] = pre100.collectFirst { case pre if pre.speedFigure.nonEmpty => pre }
+        val sra: Option[Int] = firstHavingSpeedFigure.flatMap(_.speedFigure)
+        val dsl: Option[Double] = firstHavingSpeedFigure.map(_.dsl)
+        val oof2: Option[String] = allCatch opt {
+          val oofArr = pre100.map(_.oof).toArray
+          oofArr(1)
+        }
 
-      val lateList = pre100.map(_.isLate)
-      val lateStartPer = lateList.sum.toDouble / lateList.size
+        val lateList: List[Int] = pre100.map(_.isLate)
+        val lateStartPer: Double = lateList.sum.toDouble / lateList.size
 
-      val (disRoc, eps, winRun) = if (pre100.isEmpty) {
-        (None, None, None)
+        val (disRoc, eps, winRun) = if (pre100.isEmpty) {
+          (None, None, None)
+        } else {
+          val distances = pre100.map(_.distance)
+          val mean = distances.sum.toDouble / distances.size
+          val disRoc = Some((distance - mean) / mean)
+
+          val earningMoney = pre100.map(_.earningMoney).collect { case Some(em) => em }
+          val eps = Some(earningMoney.sum / earningMoney.size)
+
+          val wins = pre100.map(_.isWin)
+          val winRun = Some(wins.sum.toDouble / wins.size)
+
+          (disRoc, eps, winRun)
+        }
+
+        val diff = pre100
+          .filter(pre => pre.oof.forall(c => '0' < c && c < '9'))
+          .filterNot(pre => pre.pass.isEmpty)
+          .map(pre => {
+            val xs = pre.pass.split("-")
+            xs.map(_.toInt).sum.toDouble / xs.size - pre.oof.toInt
+          })
+
+        val runningStyle = diff.sum / diff.size
+        Some(PreRating(raceId, jockeyId, disRoc, eps, sra, dsl, oof, oof2, winRun, lateStart, lateStartPer, lastPhase, margin, runningStyle))
       } else {
-        val distances = pre100.map(_.distance)
-        val mean = distances.sum.toDouble / distances.size
-        val disRoc = Some((distance - mean) / mean)
-
-        val earningMoney = pre100.map(_.earningMoney).collect { case Some(em) => em }
-        val eps = Some(earningMoney.sum / earningMoney.size)
-
-        val wins = pre100.map(_.isWin)
-        val winRun = Some(wins.sum.toDouble / wins.size)
-
-        (disRoc, eps, winRun)
+        None
       }
-
-      val diff = pre100
-        .filter(pre => pre.oof.forall(c => '0' < c && c < '9'))
-        .filterNot(pre => pre.pass.isEmpty)
-        .map(pre => {
-          val xs = pre.pass.split("-")
-          xs.map(_.toInt).sum.toDouble / xs.size - pre.oof.toInt
-        })
-
-      val runningStyle = diff.sum / diff.size
-
-      PreRating(raceId, jockeyId, disRoc, eps, sra, dsl, oof, oof2, winRun, lateStart, lateStartPer, lastPhase, margin, runningStyle)
     }
   }
 
@@ -331,7 +334,7 @@ object RaceResultRepository {
     }
   }
 
-  def preByJockey(jockeyId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[PreByJockey] = {
+  def preByJockey(jockeyId: String, date: String)(implicit ec: ExecutionContext, session: DBSession): Future[Option[PreByJockey]] = {
     Future {
       val byJockey =
         sql"""
@@ -353,14 +356,16 @@ object RaceResultRepository {
         """.map(result => (result.doubleOpt("earning_money"), result.double("is_win"))).list.apply()
 
       if (byJockey.isEmpty) {
-        PreByJockey(None, None)
+        None
       } else {
-        val earningMoney = byJockey.map(_._1).collect { case Some(em) => em }
-        val wins = byJockey.map(_._2)
+        val earningMoney: List[Double] = byJockey.map(_._1).collect { case Some(em) => em }
+        val wins: List[Double] = byJockey.map(_._2)
 
-        PreByJockey(
-          Some(earningMoney.sum / earningMoney.size),
-          Some(wins.sum / wins.size)
+        Some(
+          PreByJockey(
+            earningMoney.sum / earningMoney.size,
+            wins.sum / wins.size
+          )
         )
       }
     }
@@ -461,8 +466,8 @@ case class PreRating(
                     )
 
 case class PreByJockey(
-                        eps: Option[Double],
-                        winPer: Option[Double]
+                        eps: Double,
+                        winPer: Double
                       )
 
 
